@@ -1,10 +1,12 @@
 """
-Logging configuration with sensitive data filtering.
+Logging configuration with sensitive data filtering and structlog support.
 """
 import logging
 import sys
 import re
-from typing import Dict
+from typing import Any, Dict, Optional
+
+import structlog
 
 
 class SensitiveDataFilter(logging.Filter):
@@ -28,14 +30,66 @@ class SensitiveDataFilter(logging.Filter):
         return True
 
 
-def setup_logging(log_level: str = "INFO") -> None:
+def mask_sensitive_data(
+    logger: logging.Logger,
+    method_name: str,
+    event_dict: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Structlog processor to mask sensitive data."""
+    patterns = SensitiveDataFilter.PATTERNS
+
+    def mask_value(value: Any) -> Any:
+        if isinstance(value, str):
+            for pattern, replacement in patterns.items():
+                value = re.sub(pattern, replacement, value, flags=re.IGNORECASE)
+        return value
+
+    for key, value in event_dict.items():
+        event_dict[key] = mask_value(value)
+
+    return event_dict
+
+
+def setup_logging(log_level: str = "INFO", use_json: bool = False) -> None:
     """
-    Configure application logging.
+    Configure application logging with structlog support.
 
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        use_json: If True, output JSON-formatted logs (for production)
     """
-    # Create formatter
+    # Configure structlog processors
+    shared_processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.set_exc_info,
+        structlog.processors.TimeStamper(fmt="iso"),
+        mask_sensitive_data,
+    ]
+
+    if use_json:
+        # JSON output for production/log aggregation
+        processors = shared_processors + [
+            structlog.processors.JSONRenderer()
+        ]
+    else:
+        # Console output for development
+        processors = shared_processors + [
+            structlog.dev.ConsoleRenderer(colors=True)
+        ]
+
+    structlog.configure(
+        processors=processors,
+        wrapper_class=structlog.make_filtering_bound_logger(
+            getattr(logging, log_level.upper())
+        ),
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+    # Also configure standard logging for third-party libraries
     formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
@@ -60,5 +114,19 @@ def setup_logging(log_level: str = "INFO") -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("playwright").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
     logging.info(f"Logging configured at {log_level} level")
+
+
+def get_logger(name: Optional[str] = None) -> structlog.BoundLogger:
+    """
+    Get a structlog logger instance.
+
+    Args:
+        name: Logger name (optional)
+
+    Returns:
+        Bound structlog logger
+    """
+    return structlog.get_logger(name)

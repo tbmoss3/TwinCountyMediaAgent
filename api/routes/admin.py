@@ -1,23 +1,30 @@
 """
 Admin API endpoints for manual triggers and monitoring.
 """
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from typing import Optional
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Query
+from typing import Optional, Literal, List
 from datetime import datetime
 import logging
 
+from api.auth import verify_api_key
 from database.connection import get_database
 from database.repositories.content_repository import ContentRepository
 from database.repositories.newsletter_repository import NewsletterRepository
 
 logger = logging.getLogger(__name__)
-router = APIRouter(tags=["admin"])
+router = APIRouter(tags=["admin"], dependencies=[Depends(verify_api_key)])
+
+# Type alias for source types
+SourceType = Literal["news", "social", "council"]
 
 
 @router.post("/scrape/trigger")
 async def trigger_scrape(
     background_tasks: BackgroundTasks,
-    source_type: Optional[str] = None
+    source_type: Optional[SourceType] = Query(
+        default=None,
+        description="Type of sources to scrape: 'news', 'social', or 'council'"
+    )
 ):
     """
     Manually trigger content scraping.
@@ -188,14 +195,21 @@ async def preview_newsletter(newsletter_id: int):
 
 
 @router.get("/content/pending")
-async def get_pending_content(limit: int = 50):
-    """Get content pending filtering."""
+async def get_pending_content(
+    limit: int = Query(default=50, ge=1, le=100, description="Maximum items to return"),
+    offset: int = Query(default=0, ge=0, description="Number of items to skip")
+):
+    """Get content pending filtering with pagination."""
     try:
         db = get_database()
         content_repo = ContentRepository(db)
-        pending = await content_repo.get_pending_content(limit=limit)
+        pending = await content_repo.get_pending_content(limit=limit, offset=offset)
+        total = await content_repo.get_pending_count()
 
         return {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
             "count": len(pending),
             "items": [
                 {
@@ -213,14 +227,22 @@ async def get_pending_content(limit: int = 50):
 
 
 @router.get("/content/approved")
-async def get_approved_content(days: int = 7):
-    """Get approved content for next newsletter."""
+async def get_approved_content(
+    days: int = Query(default=7, ge=1, le=30, description="Days to look back"),
+    limit: int = Query(default=50, ge=1, le=100, description="Maximum items to return"),
+    offset: int = Query(default=0, ge=0, description="Number of items to skip")
+):
+    """Get approved content for next newsletter with pagination."""
     try:
         db = get_database()
         content_repo = ContentRepository(db)
-        approved = await content_repo.get_approved_content(days=days)
+        approved = await content_repo.get_approved_content(days=days, limit=limit, offset=offset)
+        total = await content_repo.get_approved_count(days=days)
 
         return {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
             "count": len(approved),
             "items": [
                 {

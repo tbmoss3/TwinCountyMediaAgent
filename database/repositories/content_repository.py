@@ -101,16 +101,25 @@ class ContentRepository:
         row = await self.db.fetchrow(query, content_id)
         return ScrapedContent(**dict(row)) if row else None
 
-    async def get_pending_content(self, limit: int = 100) -> List[ScrapedContent]:
-        """Get content pending filtering."""
+    async def get_pending_content(
+        self,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[ScrapedContent]:
+        """Get content pending filtering with pagination."""
         query = """
         SELECT * FROM scraped_content
         WHERE filter_status = 'pending'
         ORDER BY scraped_at DESC
-        LIMIT $1
+        LIMIT $1 OFFSET $2
         """
-        rows = await self.db.fetch(query, limit)
+        rows = await self.db.fetch(query, limit, offset)
         return [ScrapedContent(**dict(row)) for row in rows]
+
+    async def get_pending_count(self) -> int:
+        """Get total count of pending content."""
+        query = "SELECT COUNT(*) FROM scraped_content WHERE filter_status = 'pending'"
+        return await self.db.fetchval(query)
 
     async def update_filter_result(
         self,
@@ -154,14 +163,18 @@ class ContentRepository:
     async def get_approved_content(
         self,
         days: int = 7,
-        exclude_used: bool = True
+        exclude_used: bool = True,
+        limit: int = 100,
+        offset: int = 0
     ) -> List[ApprovedContent]:
         """
-        Get approved content for newsletter.
+        Get approved content for newsletter with pagination.
 
         Args:
             days: Number of days to look back
             exclude_used: Exclude content already used in newsletters
+            limit: Maximum items to return
+            offset: Number of items to skip
         """
         cutoff = datetime.now() - timedelta(days=days)
 
@@ -173,16 +186,19 @@ class ContentRepository:
             AND sc.scraped_at >= $1
             AND ncl.id IS NULL
             ORDER BY sc.scraped_at DESC
+            LIMIT $2 OFFSET $3
             """
+            rows = await self.db.fetch(query, cutoff, limit, offset)
         else:
             query = """
             SELECT * FROM scraped_content
             WHERE filter_status = 'approved'
             AND scraped_at >= $1
             ORDER BY scraped_at DESC
+            LIMIT $2 OFFSET $3
             """
+            rows = await self.db.fetch(query, cutoff, limit, offset)
 
-        rows = await self.db.fetch(query, cutoff)
         return [
             ApprovedContent(
                 id=row['id'],
@@ -200,6 +216,26 @@ class ContentRepository:
             )
             for row in rows
         ]
+
+    async def get_approved_count(self, days: int = 7, exclude_used: bool = True) -> int:
+        """Get total count of approved content."""
+        cutoff = datetime.now() - timedelta(days=days)
+
+        if exclude_used:
+            query = """
+            SELECT COUNT(*) FROM scraped_content sc
+            LEFT JOIN newsletter_content_links ncl ON sc.id = ncl.content_id
+            WHERE sc.filter_status = 'approved'
+            AND sc.scraped_at >= $1
+            AND ncl.id IS NULL
+            """
+        else:
+            query = """
+            SELECT COUNT(*) FROM scraped_content
+            WHERE filter_status = 'approved'
+            AND scraped_at >= $1
+            """
+        return await self.db.fetchval(query, cutoff)
 
     async def get_approved_events(self, days_ahead: int = 30) -> List[ApprovedContent]:
         """Get upcoming events."""

@@ -1,16 +1,29 @@
 """
 Mailchimp integration service for newsletter delivery.
 """
+import asyncio
 import logging
-from typing import Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
+from typing import Dict, Any, List
 
 import mailchimp_marketing as MailchimpMarketing
 from mailchimp_marketing.api_client import ApiClientError
+from circuitbreaker import circuit
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
 
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Thread pool for running synchronous Mailchimp SDK calls
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mailchimp_")
 
 
 class MailchimpService:
@@ -25,6 +38,44 @@ class MailchimpService:
             "server": self.settings.mailchimp_server_prefix
         })
 
+    async def _run_in_executor(self, func, *args, **kwargs):
+        """
+        Run a synchronous function in a thread pool to avoid blocking.
+
+        Args:
+            func: The synchronous function to run
+            *args: Positional arguments for the function
+            **kwargs: Keyword arguments for the function
+
+        Returns:
+            The result of the function call
+        """
+        loop = asyncio.get_event_loop()
+        if kwargs:
+            func_with_kwargs = partial(func, *args, **kwargs)
+            return await loop.run_in_executor(_executor, func_with_kwargs)
+        return await loop.run_in_executor(_executor, func, *args)
+
+    def _get_retry_decorator(self):
+        """Create retry decorator for Mailchimp API calls."""
+        return retry(
+            stop=stop_after_attempt(self.settings.api_retry_attempts),
+            wait=wait_exponential(
+                multiplier=1,
+                min=self.settings.api_retry_min_wait,
+                max=self.settings.api_retry_max_wait
+            ),
+            retry=retry_if_exception_type(ApiClientError),
+            before_sleep=lambda retry_state: logger.warning(
+                f"Mailchimp API call failed, retrying in {retry_state.next_action.sleep} seconds..."
+            )
+        )
+
+    @circuit(
+        failure_threshold=5,
+        recovery_timeout=60,
+        expected_exception=ApiClientError
+    )
     async def create_campaign(
         self,
         subject_line: str,
@@ -60,7 +111,10 @@ class MailchimpService:
                 }
             }
 
-            campaign = self.client.campaigns.create(campaign_data)
+            # Run synchronous SDK call in thread pool
+            campaign = await self._run_in_executor(
+                self.client.campaigns.create, campaign_data
+            )
             campaign_id = campaign["id"]
 
             logger.info(f"Created Mailchimp campaign: {campaign_id}")
@@ -70,7 +124,9 @@ class MailchimpService:
             if plain_text_content:
                 content_data["plain_text"] = plain_text_content
 
-            self.client.campaigns.set_content(campaign_id, content_data)
+            await self._run_in_executor(
+                self.client.campaigns.set_content, campaign_id, content_data
+            )
 
             logger.info(f"Set content for campaign {campaign_id}")
 
@@ -103,7 +159,8 @@ class MailchimpService:
             Dict with status and recipients
         """
         try:
-            self.client.campaigns.send_test_email(
+            await self._run_in_executor(
+                self.client.campaigns.send_test_email,
                 campaign_id,
                 {"test_emails": test_emails, "send_type": "html"}
             )
@@ -138,7 +195,8 @@ class MailchimpService:
             Dict with status and scheduled time
         """
         try:
-            self.client.campaigns.schedule(
+            await self._run_in_executor(
+                self.client.campaigns.schedule,
                 campaign_id,
                 {"schedule_time": send_time.isoformat()}
             )
@@ -168,7 +226,9 @@ class MailchimpService:
             Dict with status and sent time
         """
         try:
-            self.client.campaigns.send(campaign_id)
+            await self._run_in_executor(
+                self.client.campaigns.send, campaign_id
+            )
 
             logger.info(f"Sent campaign {campaign_id}")
 
@@ -195,7 +255,9 @@ class MailchimpService:
             Dict with campaign metrics
         """
         try:
-            report = self.client.reports.get_campaign_report(campaign_id)
+            report = await self._run_in_executor(
+                self.client.reports.get_campaign_report, campaign_id
+            )
 
             return {
                 "campaign_id": campaign_id,
@@ -219,7 +281,7 @@ class MailchimpService:
     async def health_check(self) -> bool:
         """Check Mailchimp API connectivity."""
         try:
-            self.client.ping.get()
+            await self._run_in_executor(self.client.ping.get)
             return True
         except Exception as e:
             logger.error(f"Mailchimp health check failed: {e}")
@@ -228,7 +290,9 @@ class MailchimpService:
     async def get_list_stats(self) -> Dict[str, Any]:
         """Get audience/list statistics."""
         try:
-            list_info = self.client.lists.get_list(self.settings.mailchimp_list_id)
+            list_info = await self._run_in_executor(
+                self.client.lists.get_list, self.settings.mailchimp_list_id
+            )
 
             return {
                 "list_id": self.settings.mailchimp_list_id,
