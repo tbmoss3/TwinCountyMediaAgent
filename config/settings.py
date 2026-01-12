@@ -1,8 +1,9 @@
 """
 Application configuration management using Pydantic settings.
 """
+from functools import lru_cache
 from typing import Optional
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -105,6 +106,12 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", description="Logging level")
     debug: bool = Field(default=False, description="Debug mode")
 
+    # Security Settings
+    admin_api_key: Optional[str] = Field(
+        default=None,
+        description="API key for admin endpoints (required in production)"
+    )
+
     # Scraping Settings
     scrape_frequency_hours: int = Field(
         default=6,
@@ -117,6 +124,32 @@ class Settings(BaseSettings):
     max_items_per_source: int = Field(
         default=20,
         description="Maximum items to fetch per source"
+    )
+    scraper_rate_limit_seconds: float = Field(
+        default=2.0,
+        description="Seconds to wait between scraping different sources"
+    )
+
+    # Resilience Settings
+    api_retry_attempts: int = Field(
+        default=3,
+        description="Number of retry attempts for external API calls"
+    )
+    api_retry_min_wait: float = Field(
+        default=2.0,
+        description="Minimum wait time between retries (seconds)"
+    )
+    api_retry_max_wait: float = Field(
+        default=10.0,
+        description="Maximum wait time between retries (seconds)"
+    )
+    circuit_breaker_failure_threshold: int = Field(
+        default=5,
+        description="Number of failures before circuit breaker opens"
+    )
+    circuit_breaker_recovery_timeout: int = Field(
+        default=60,
+        description="Seconds before circuit breaker attempts recovery"
     )
 
     # Feature Flags
@@ -168,21 +201,30 @@ class Settings(BaseSettings):
         """Check if social scraping is configured and enabled."""
         return self.enable_social_scraping and self.bright_data_api_key is not None
 
+    @property
+    def requires_api_auth(self) -> bool:
+        """Check if API authentication is required (production) or optional."""
+        return self.is_production or self.admin_api_key is not None
 
-# Global settings instance
-_settings: Optional[Settings] = None
+    @model_validator(mode="after")
+    def validate_production_settings(self) -> "Settings":
+        """Validate that production has required security settings."""
+        if self.is_production and not self.admin_api_key:
+            raise ValueError("admin_api_key is required in production environment")
+        return self
 
 
+@lru_cache()
 def get_settings() -> Settings:
-    """Get or create the global settings instance."""
-    global _settings
-    if _settings is None:
-        _settings = Settings()
-    return _settings
+    """
+    Get cached settings instance.
+
+    Uses lru_cache for efficient singleton pattern that's also testable.
+    """
+    return Settings()
 
 
 def reload_settings() -> Settings:
     """Reload settings from environment (useful for testing)."""
-    global _settings
-    _settings = Settings()
-    return _settings
+    get_settings.cache_clear()
+    return get_settings()

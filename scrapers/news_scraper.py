@@ -220,10 +220,11 @@ class NewsScraper(BaseScraper):
                         from dateutil import parser
                         try:
                             return parser.parse(date_text)
-                        except:
-                            pass
-        except:
-            pass
+                        except (ValueError, parser.ParserError):
+                            # Date parsing failed, try next selector
+                            continue
+        except (AttributeError, ValueError, TypeError) as e:
+            self.logger.debug(f"Error extracting date: {e}")
 
         return None
 
@@ -241,8 +242,8 @@ class NewsScraper(BaseScraper):
                 img = article.find('img', src=True)
                 if img:
                     return img['src']
-        except:
-            pass
+        except (AttributeError, TypeError) as e:
+            self.logger.debug(f"Error extracting image: {e}")
 
         return None
 
@@ -253,8 +254,8 @@ class NewsScraper(BaseScraper):
                 elem = soup.select_one(selector)
                 if elem:
                     return self.clean_text(elem.get_text())
-        except:
-            pass
+        except (AttributeError, TypeError) as e:
+            self.logger.debug(f"Error extracting author: {e}")
 
         return None
 
@@ -264,5 +265,6 @@ class NewsScraper(BaseScraper):
             async with AsyncWebCrawler(config=self.browser_config) as crawler:
                 result = await crawler.arun(url=self.source.url)
                 return result.success
-        except:
+        except Exception as e:
+            self.logger.warning(f"Health check failed for {self.source.name}: {e}")
             return False

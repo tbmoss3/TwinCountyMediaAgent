@@ -1,8 +1,9 @@
 """
 Orchestrator for running all scrapers.
 """
+import asyncio
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime
 import uuid
 
@@ -102,11 +103,13 @@ class ScraperOrchestrator:
 
         return stats
 
-    async def _run_news_scrapers(self) -> dict:
-        """Run all news scrapers."""
+    async def _run_news_scrapers(self) -> Dict[str, int]:
+        """Run all news scrapers with rate limiting."""
         stats = {"items_found": 0, "items_new": 0, "items_duplicate": 0, "sources_scraped": 0}
+        rate_limit = self.settings.scraper_rate_limit_seconds
 
-        for source in get_active_news_sources():
+        sources = get_active_news_sources()
+        for i, source in enumerate(sources):
             try:
                 scraper = NewsScraper(source)
                 items = await scraper.scrape()
@@ -119,16 +122,23 @@ class ScraperOrchestrator:
 
                 stats["sources_scraped"] += 1
 
+                # Rate limiting: wait between sources (except after last one)
+                if i < len(sources) - 1 and rate_limit > 0:
+                    logger.debug(f"Rate limiting: waiting {rate_limit}s before next source")
+                    await asyncio.sleep(rate_limit)
+
             except Exception as e:
                 logger.error(f"Error scraping {source.name}: {e}")
 
         return stats
 
-    async def _run_council_scrapers(self) -> dict:
-        """Run all council scrapers."""
+    async def _run_council_scrapers(self) -> Dict[str, int]:
+        """Run all council scrapers with rate limiting."""
         stats = {"items_found": 0, "items_new": 0, "items_duplicate": 0, "sources_scraped": 0}
+        rate_limit = self.settings.scraper_rate_limit_seconds
 
-        for source in get_active_council_sources():
+        sources = get_active_council_sources()
+        for i, source in enumerate(sources):
             try:
                 scraper = CouncilScraper(source)
                 items = await scraper.scrape()
@@ -141,16 +151,22 @@ class ScraperOrchestrator:
 
                 stats["sources_scraped"] += 1
 
+                # Rate limiting
+                if i < len(sources) - 1 and rate_limit > 0:
+                    await asyncio.sleep(rate_limit)
+
             except Exception as e:
                 logger.error(f"Error scraping {source.name}: {e}")
 
         return stats
 
-    async def _run_social_scrapers(self) -> dict:
-        """Run all social scrapers."""
+    async def _run_social_scrapers(self) -> Dict[str, int]:
+        """Run all social scrapers with rate limiting."""
         stats = {"items_found": 0, "items_new": 0, "items_duplicate": 0, "sources_scraped": 0}
+        rate_limit = self.settings.scraper_rate_limit_seconds
 
-        for source in get_active_social_sources():
+        sources = get_active_social_sources()
+        for i, source in enumerate(sources):
             try:
                 scraper = BrightDataSocialScraper(source)
 
@@ -167,6 +183,10 @@ class ScraperOrchestrator:
                     stats["items_duplicate"] += result["duplicate"]
 
                 stats["sources_scraped"] += 1
+
+                # Rate limiting
+                if i < len(sources) - 1 and rate_limit > 0:
+                    await asyncio.sleep(rate_limit)
 
             except Exception as e:
                 logger.error(f"Error scraping {source.name}: {e}")

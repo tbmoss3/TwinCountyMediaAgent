@@ -5,19 +5,53 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import (
+    Counter,
+    Histogram,
+    generate_latest,
+    CONTENT_TYPE_LATEST,
+)
 
 from config.settings import get_settings
 from config.logging_config import setup_logging
-from database.connection import init_database, close_database, get_database
+from database.connection import init_database, close_database
 from database.schema import DatabaseSchema
 from api.routes import health, admin, webhooks
+from api.middleware import RequestIDMiddleware
 
 logger = logging.getLogger(__name__)
 
 # Global scheduler reference
 _scheduler = None
+
+# Prometheus metrics - exported for use in other modules
+REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"]
+)
+REQUEST_LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request latency",
+    ["method", "endpoint"]
+)
+SCRAPE_COUNT = Counter(
+    "scrape_items_total",
+    "Total items scraped",
+    ["source_type", "status"]
+)
+FILTER_COUNT = Counter(
+    "filter_decisions_total",
+    "Content filter decisions",
+    ["decision"]
+)
+NEWSLETTER_COUNT = Counter(
+    "newsletters_total",
+    "Newsletters sent",
+    ["status"]
+)
 
 
 @asynccontextmanager
@@ -68,6 +102,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan
     )
 
+    # Request ID tracking middleware (add first so it's executed last)
+    app.add_middleware(RequestIDMiddleware)
+
     # CORS middleware
     app.add_middleware(
         CORSMiddleware,
@@ -92,6 +129,14 @@ def create_app() -> FastAPI:
             "coverage": ["Nash County", "Edgecombe County", "Wilson County"],
             "status": "running"
         }
+
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus metrics endpoint."""
+        return Response(
+            content=generate_latest(),
+            media_type=CONTENT_TYPE_LATEST
+        )
 
     return app
 

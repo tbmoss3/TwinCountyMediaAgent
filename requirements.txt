@@ -4,6 +4,7 @@ uvicorn[standard]>=0.27.0
 
 # Database
 asyncpg>=0.30.0
+alembic>=1.13.0
 
 # Web scraping
 crawl4ai>=0.4.0
@@ -30,6 +31,15 @@ python-dotenv>=1.0.0
 python-dateutil>=2.8.2
 pytz>=2024.1
 
-# Development/Testing (optional)
+# Resilience & Reliability
+tenacity>=8.2.3
+circuitbreaker>=2.0.0
+
+# Observability
+structlog>=24.1.0
+prometheus-client>=0.19.0
+
+# Development/Testing
 pytest>=7.4.4
 pytest-asyncio>=0.23.3
+pytest-cov>=4.1.0

@@ -1,8 +1,10 @@
 """
 PostgreSQL database connection management using asyncpg.
 """
+import asyncio
 import logging
 from typing import Optional
+
 import asyncpg
 
 from config.settings import Settings
@@ -27,30 +29,66 @@ class Database:
         self.max_size = max_size
         self._pool: Optional[asyncpg.Pool] = None
 
-    async def connect(self) -> None:
-        """Create database connection pool."""
+    async def connect(
+        self,
+        max_retries: int = 5,
+        retry_delay: float = 2.0
+    ) -> None:
+        """
+        Create database connection pool with retry logic.
+
+        Args:
+            max_retries: Maximum number of connection attempts
+            retry_delay: Base delay between retries (uses exponential backoff)
+        """
         if self._pool is not None:
             logger.warning("Database pool already exists")
             return
 
-        try:
-            logger.info(f"Creating database connection pool (min={self.min_size}, max={self.max_size})...")
-            self._pool = await asyncpg.create_pool(
-                self.database_url,
-                min_size=self.min_size,
-                max_size=self.max_size,
-                command_timeout=60
-            )
-            logger.info("Database connection pool created successfully")
+        last_error: Optional[Exception] = None
 
-            # Test connection
-            async with self._pool.acquire() as conn:
-                version = await conn.fetchval("SELECT version()")
-                logger.info(f"Connected to: {version[:50]}...")
+        for attempt in range(max_retries):
+            try:
+                logger.info(
+                    f"Creating database connection pool "
+                    f"(min={self.min_size}, max={self.max_size}, attempt={attempt + 1}/{max_retries})..."
+                )
+                self._pool = await asyncpg.create_pool(
+                    self.database_url,
+                    min_size=self.min_size,
+                    max_size=self.max_size,
+                    command_timeout=60
+                )
+                logger.info("Database connection pool created successfully")
 
-        except Exception as e:
-            logger.error(f"Failed to create database pool: {e}")
-            raise
+                # Test connection
+                async with self._pool.acquire() as conn:
+                    version = await conn.fetchval("SELECT version()")
+                    logger.info(f"Connected to: {version[:50]}...")
+
+                return  # Success, exit retry loop
+
+            except (asyncpg.PostgresError, OSError, ConnectionError) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(
+                        f"Database connection failed (attempt {attempt + 1}/{max_retries}): {e}. "
+                        f"Retrying in {wait_time:.1f}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(
+                        f"Failed to create database pool after {max_retries} attempts: {e}"
+                    )
+            except Exception as e:
+                # For unexpected errors, don't retry
+                logger.error(f"Unexpected error creating database pool: {e}")
+                raise
+
+        # If we get here, all retries failed
+        if last_error:
+            raise last_error
 
     async def disconnect(self) -> None:
         """Close database connection pool."""

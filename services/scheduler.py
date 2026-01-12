@@ -1,14 +1,16 @@
 """
 Scheduler service for periodic tasks using APScheduler.
 """
+import json
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.jobstores.base import JobLookupError
 
 from database.connection import Database
 from config.settings import get_settings
@@ -30,8 +32,34 @@ class SchedulerService:
         self.settings = get_settings()
         self.scheduler = AsyncIOScheduler()
 
-        # Track pending newsletter for delayed send
+        # Track pending newsletter for delayed send (loaded from DB on start)
         self._pending_newsletter_id: Optional[int] = None
+
+    async def _load_state(self) -> None:
+        """Load scheduler state from database."""
+        try:
+            query = "SELECT value FROM system_state WHERE key = 'scheduler'"
+            row = await self.db.fetchrow(query)
+            if row:
+                state = row['value'] if isinstance(row['value'], dict) else json.loads(row['value'])
+                self._pending_newsletter_id = state.get('pending_newsletter_id')
+                if self._pending_newsletter_id:
+                    logger.info(f"Restored pending newsletter ID from database: {self._pending_newsletter_id}")
+        except Exception as e:
+            logger.warning(f"Failed to load scheduler state: {e}")
+
+    async def _save_state(self) -> None:
+        """Save scheduler state to database."""
+        try:
+            state = json.dumps({'pending_newsletter_id': self._pending_newsletter_id})
+            query = """
+                UPDATE system_state SET value = $1::jsonb, updated_at = NOW()
+                WHERE key = 'scheduler'
+            """
+            await self.db.execute(query, state)
+            logger.debug(f"Saved scheduler state: pending_newsletter_id={self._pending_newsletter_id}")
+        except Exception as e:
+            logger.warning(f"Failed to save scheduler state: {e}")
 
     def start(self):
         """Start the scheduler with all configured jobs."""
@@ -101,6 +129,7 @@ class SchedulerService:
 
             if newsletter_id:
                 self._pending_newsletter_id = newsletter_id
+                await self._save_state()  # Persist to database
 
                 # Schedule the final send after preview delay
                 if self.settings.auto_send_after_preview:
@@ -141,6 +170,7 @@ class SchedulerService:
                 logger.error(f"Failed to send newsletter {self._pending_newsletter_id}")
 
             self._pending_newsletter_id = None
+            await self._save_state()  # Persist cleared state to database
 
         except Exception as e:
             logger.exception(f"Error sending pending newsletter: {e}")
@@ -204,7 +234,8 @@ class SchedulerService:
             # Cancel the scheduled job if exists
             try:
                 self.scheduler.remove_job("pending_newsletter_send")
-            except:
+            except JobLookupError:
+                # Job doesn't exist, that's fine
                 pass
 
             await self._send_pending_newsletter()

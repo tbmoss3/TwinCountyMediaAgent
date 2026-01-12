@@ -1,11 +1,20 @@
 """
 Claude AI-powered content filtering and classification.
 """
-import logging
+import asyncio
 import json
-from typing import Optional
+import logging
+from typing import List, Optional, Tuple
 
 import anthropic
+from anthropic import AsyncAnthropic
+from circuitbreaker import circuit
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
 
 from config.settings import get_settings
 from database.models import ScrapedContent, FilterResult, FilterStatus
@@ -67,7 +76,49 @@ IMPORTANT: Respond with ONLY a valid JSON object (no markdown, no code blocks, n
     def __init__(self):
         """Initialize content filter service."""
         self.settings = get_settings()
-        self.client = anthropic.Anthropic(api_key=self.settings.anthropic_api_key)
+        # Use async client for non-blocking API calls
+        self.client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
+
+    def _get_retry_decorator(self):
+        """Create retry decorator with settings from config."""
+        return retry(
+            stop=stop_after_attempt(self.settings.api_retry_attempts),
+            wait=wait_exponential(
+                multiplier=1,
+                min=self.settings.api_retry_min_wait,
+                max=self.settings.api_retry_max_wait
+            ),
+            retry=retry_if_exception_type((
+                anthropic.RateLimitError,
+                anthropic.APIConnectionError,
+                anthropic.InternalServerError,
+            )),
+            before_sleep=lambda retry_state: logger.warning(
+                f"Claude API call failed, retrying in {retry_state.next_action.sleep} seconds..."
+            )
+        )
+
+    @circuit(
+        failure_threshold=5,
+        recovery_timeout=60,
+        expected_exception=anthropic.APIError
+    )
+    async def _call_claude_api(self, prompt: str) -> str:
+        """
+        Call Claude API with circuit breaker protection.
+
+        Args:
+            prompt: The prompt to send to Claude
+
+        Returns:
+            Response text from Claude
+        """
+        message = await self.client.messages.create(
+            model=self.settings.claude_model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return message.content[0].text.strip()
 
     async def filter_content(self, content: ScrapedContent) -> FilterResult:
         """
@@ -89,14 +140,14 @@ IMPORTANT: Respond with ONLY a valid JSON object (no markdown, no code blocks, n
                 county=content.county or "Unknown"
             )
 
-            message = self.client.messages.create(
-                model=self.settings.claude_model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}]
-            )
+            # Call Claude API with retry logic
+            retry_decorator = self._get_retry_decorator()
 
-            # Parse JSON response
-            response_text = message.content[0].text.strip()
+            @retry_decorator
+            async def make_api_call():
+                return await self._call_claude_api(prompt)
+
+            response_text = await make_api_call()
 
             # Clean up response if it has markdown code blocks
             if response_text.startswith("```"):
@@ -151,9 +202,9 @@ IMPORTANT: Respond with ONLY a valid JSON object (no markdown, no code blocks, n
 
     async def batch_filter(
         self,
-        contents: list,
+        contents: List[ScrapedContent],
         max_concurrent: int = 5
-    ) -> list:
+    ) -> List[Tuple[ScrapedContent, FilterResult]]:
         """
         Filter multiple content items.
 
@@ -164,12 +215,11 @@ IMPORTANT: Respond with ONLY a valid JSON object (no markdown, no code blocks, n
         Returns:
             List of (ScrapedContent, FilterResult) tuples
         """
-        import asyncio
-
-        results = []
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def filter_with_semaphore(content):
+        async def filter_with_semaphore(
+            content: ScrapedContent
+        ) -> Tuple[ScrapedContent, FilterResult]:
             async with semaphore:
                 result = await self.filter_content(content)
                 return (content, result)
@@ -183,3 +233,22 @@ IMPORTANT: Respond with ONLY a valid JSON object (no markdown, no code blocks, n
         logger.info(f"Batch filter complete: {approved} approved, {rejected} rejected")
 
         return results
+
+    async def health_check(self) -> bool:
+        """
+        Check if Claude API is accessible.
+
+        Returns:
+            True if API is healthy, False otherwise
+        """
+        try:
+            # Use a minimal test to check API connectivity
+            message = await self.client.messages.create(
+                model="claude-3-haiku-20240307",  # Use cheapest model for health check
+                max_tokens=10,
+                messages=[{"role": "user", "content": "test"}]
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Claude API health check failed: {e}")
+            return False

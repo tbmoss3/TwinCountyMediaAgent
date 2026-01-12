@@ -188,6 +188,19 @@ CREATE TABLE IF NOT EXISTS source_configs (
 -- Indexes for source_configs
 CREATE INDEX IF NOT EXISTS idx_source_configs_active ON source_configs(is_active);
 CREATE INDEX IF NOT EXISTS idx_source_configs_type ON source_configs(source_type);
+
+-- Table: system_state
+-- Stores persistent system state (e.g., scheduler state)
+CREATE TABLE IF NOT EXISTS system_state (
+    id SERIAL PRIMARY KEY,
+    key VARCHAR(100) UNIQUE NOT NULL,
+    value JSONB NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Initialize default system state
+INSERT INTO system_state (key, value) VALUES ('scheduler', '{"pending_newsletter_id": null}')
+ON CONFLICT (key) DO NOTHING;
 """
 
 
